@@ -8,8 +8,7 @@
     "deploy-dev": "export DEPLOY_STAGE='dev' && serverless deploy --verbose"
   },
   "repository": {
-    "type": "git",
-    "url": "git+ssh://git@gitlab.com/legal-badger/microservice-template.git"
+    "type": "git"
   },
   "author": "Jairo",
   "license": "ISC",
