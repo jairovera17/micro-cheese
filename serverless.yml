@@ -1,0 +1,179 @@
+service: usrv-cheese
+frameworkVersion: "3"
+configValidationMode: error
+
+provider:
+  region: us-east-2
+  name: aws
+  stage: ${env:DEPLOY_STAGE}
+  endpointType: REGIONAL
+  architecture: arm64
+  runtime: nodejs20.x
+  logRetentionInDays: 7
+  environment:
+    DYNAMO_USER_TABLE_NAME: ${self:resources.Resources.userTable.Properties.TableName}
+    S3_BUCKET_NAME: ${self:resources.Resources.assetsBucket.Properties.BucketName}
+    ENV_STAGE: ${self:provider.stage}
+  iam:
+    role:
+      name: ${self:service}-${self:provider.stage}-default-role
+      statements:
+        - Effect: "Allow"
+          Action:
+            - s3:PutObject
+          Resource:
+            - "arn:aws:s3:::${self:resources.Resources.assetsBucket.Properties.BucketName}"
+            - "arn:aws:s3:::${self:resources.Resources.assetsBucket.Properties.BucketName}/*"
+        - Effect: Allow
+          Action:
+            - lambda:InvokeFunction
+          Resource: "arn:aws:lambda:us-east-1:*:*"
+        - Effect: "Allow"
+          Action:
+            - dynamodb:PutItem
+          Resource:
+            - Fn::GetAtt:
+                - userTable
+                - Arn
+        - Effect: "Allow"
+          Action:
+            - events:*
+          Resource:
+            "Fn::GetAtt":
+              - usersEventBus
+              - Arn
+
+custom:
+  version: v1
+  esbuild:
+    minify: false
+    exclude:
+      - "@aws-sdk/*"
+    external:
+      - pg-native
+      - dayjs
+  prefix: /${self:provider.stage}/${self:service}
+  apigwBinary:
+    types:
+      - "*/*"
+  corsConfig:
+    origin: "*"
+    headers:
+      - Authorization
+      - Content-Type
+      - X-Amz-Date
+      - X-Api-Key
+      - X-Amz-Security-Token
+      - X-Amz-User-Agent
+plugins:
+  - serverless-esbuild
+  - serverless-tag-cloud-watch-logs
+  - serverless-tag-api-gateway
+
+functions:
+  say-hi:
+    memorySize: 128
+    handler: src/service/sayHi/lambdaHandler.handler
+    events:
+      - http:
+          method: get
+          path: ${self:custom.version}/say-hi
+          cors: ${self:custom.corsConfig}
+  put-user:
+    memorySize: 128
+    handler: src/service/putUser/lambdaHandler.handler
+    events:
+      - http:
+          authorizer:
+          method: put
+          path: ${self:custom.version}/user
+          cors: ${self:custom.corsConfig}
+  save-user-in-s3:
+    memorySize: 128
+    handler: src/service/saveUserAsJson/lambdaHandler.handler
+    events:
+      - eventBridge:
+          eventBus:
+            Fn::GetAtt: [usersEventBus, Name]
+          inputPath: "$.detail"
+          pattern:
+            detail-type:
+              - "object"
+            detail:
+              eventName:
+                - "INSERT"
+package:
+  individually: true
+  excludeDevDependencies: true
+
+resources:
+  Resources:
+    assetsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:service}-${self:provider.stage}-cheese-demo
+    userTable:
+      Type: "AWS::DynamoDB::Table"
+      Properties:
+        TableName: ${self:service}-${self:provider.stage}-user
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+    usersEventBus:
+      Type: "AWS::Events::EventBus"
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-users
+    pipeRole:
+      Type: AWS::IAM::Role
+      Properties:
+        AssumeRolePolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - pipes.amazonaws.com
+              Action:
+                - sts:AssumeRole
+        Policies:
+          - PolicyName: SourcePolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "dynamodb:DescribeStream"
+                    - "dynamodb:GetRecords"
+                    - "dynamodb:GetShardIterator"
+                    - "dynamodb:ListStreams"
+                  Resource: !GetAtt userTable.StreamArn
+          - PolicyName: TargetPolicy
+            PolicyDocument:
+              Version: "2012-10-17"
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - "events:PutEvents"
+                  Resource: !GetAtt usersEventBus.Arn
+    pipe:
+      Type: AWS::Pipes::Pipe
+      Properties:
+        Name: ${self:service}-${self:provider.stage}-users-table-to-eventbridge
+        Description: "Pipe to connect DDB stream to EventBridge event bus"
+        RoleArn: !GetAtt pipeRole.Arn
+        Source: !GetAtt userTable.StreamArn
+        SourceParameters:
+          DynamoDBStreamParameters:
+            StartingPosition: LATEST
+            BatchSize: 1
+        Target: !GetAtt usersEventBus.Arn
+        TargetParameters:
+          EventBridgeEventBusParameters:
+            DetailType: "object"
+            Source: "authorizer"

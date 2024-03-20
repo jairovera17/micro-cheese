@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "baseUrl": ".",
+    "paths": {
+      "handler/*": ["src/handler/*"],
+      "middleware/*": ["src/middleware/*"]
+    },
+    "target": "es2015",
+    "lib": ["es2021", "dom"],
+    "types": ["mocha", "node", "reflect-metadata"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "emitDecoratorMetadata": true,
+    "allowJs": true,
+    "pretty": true
+  }
+}
